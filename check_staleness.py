@@ -27,7 +27,8 @@ ALERT_MARKER = "/tmp/tv_stale_alert_sent"
 ALERT_COOLDOWN_SECONDS = 3600  # 1 hour between alerts
 
 # Staleness threshold: alert if data older than this (hours)
-STALE_THRESHOLD_HOURS = 1
+# Cron runs every 2h (0 */2 * * 1-5). Threshold = 2.5h gives buffer for cron lag.
+STALE_THRESHOLD_HOURS = 2.5
 
 # CME Globex hours: Sun 17:00 CT – Fri 16:00 CT (almost 23h/day)
 # Simplified: weekdays are always "market hours" for alerting purposes.
