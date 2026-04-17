@@ -35,7 +35,7 @@ STALE_THRESHOLD_HOURS = 2.5
 # Weekend = Saturday all day + Sunday before 17:00 CT (UTC-6 winter / UTC-5 summer)
 
 # Path to ibkr_stack env_loader for credential access
-IBKR_SCRIPTS_DIR = os.path.join(os.path.expanduser("~"), "ibkr_stack", "scripts")
+IBKR_SCRIPTS_DIR = os.path.join(os.path.expanduser("~"), "ibkr", "scripts")
 
 
 def log(msg: str) -> None:
