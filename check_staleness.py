@@ -35,7 +35,7 @@ STALE_THRESHOLD_HOURS = 2.5
 # Weekend = Saturday all day + Sunday before 17:00 CT (UTC-6 winter / UTC-5 summer)
 
 # Path to ibkr_stack env_loader for credential access
-IBKR_SCRIPTS_DIR = os.path.join(os.path.expanduser("~"), "ibkr_stack", "scripts")
+IBKR_SCRIPTS_DIR = os.path.join(os.path.expanduser("~"), "ibkr", "scripts")
 
 
 def log(msg: str) -> None:
@@ -128,6 +128,14 @@ def check_cache_files() -> list[dict]:
     return results
 
 
+def _newest_age_minutes(results: list[dict]) -> int | None:
+    """Return age in minutes of the most recently refreshed cache file, or None."""
+    ages = [r["age_hours"] for r in results if r.get("age_hours") is not None]
+    if not ages:
+        return None
+    return int(round(min(ages) * 60))
+
+
 def can_send_alert() -> bool:
     """Check if cooldown period has passed since last alert."""
     if not os.path.exists(ALERT_MARKER):
@@ -207,6 +215,20 @@ def main() -> int:
 
     if not stale_files:
         log("All cache files are fresh")
+        # Recovery: a stale alert was previously sent, notify and clear marker
+        if os.path.exists(ALERT_MARKER):
+            newest_age_min = _newest_age_minutes(results)
+            age_str = f"{newest_age_min} min" if newest_age_min is not None else "recently"
+            msg = (
+                f"✅ <b>TradingView Cache Fresh</b>\n\n"
+                f"{len(fresh_files)}/{len(results)} cache files fresh "
+                f"(refreshed {age_str} ago)"
+            )
+            if send_telegram(msg):
+                try:
+                    os.remove(ALERT_MARKER)
+                except OSError as e:
+                    log(f"Could not remove alert marker: {e}")
         return 0
 
     for sf in stale_files:
@@ -215,16 +237,16 @@ def main() -> int:
 
     # Send Telegram alert if cooldown allows
     if can_send_alert():
-        stale_list = "\n".join(
-            f"  • {sf['file']}: {sf['age_hours']}h old" if sf['age_hours'] else f"  • {sf['file']}: no timestamp"
-            for sf in stale_files
+        oldest_age = max(
+            (sf["age_hours"] for sf in stale_files if sf["age_hours"] is not None),
+            default=None,
         )
+        oldest_str = f"{oldest_age}h" if oldest_age is not None else "unknown"
         msg = (
             f"⚠️ <b>TradingView Cache Stale</b>\n\n"
-            f"{len(stale_files)}/{len(results)} cache files are stale "
-            f"(threshold: {STALE_THRESHOLD_HOURS}h):\n\n"
-            f"{stale_list}\n\n"
-            f"Run: <code>bash ~/AIProjects/shadow-grab-dashboard/refresh_data.sh</code>"
+            f"{len(stale_files)}/{len(results)} cache files stale "
+            f"(threshold: {STALE_THRESHOLD_HOURS}h)\n"
+            f"Oldest: {oldest_str}"
         )
         send_telegram(msg)
         mark_alert_sent()
