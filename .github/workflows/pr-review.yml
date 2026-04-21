@@ -1,0 +1,483 @@
+name: PR Review & Auto-Merge
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  level-a-lint:
+    name: "Level A: Lint & Security Patterns"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Get changed Python files
+        id: changed
+        run: |
+          FILES=$(git diff --name-only --diff-filter=ACMR ${{ github.event.pull_request.base.sha }}...${{ github.sha }} -- '*.py' || true)
+          echo "py_files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          if [ -n "$FILES" ]; then echo "has_py=true" >> "$GITHUB_OUTPUT"; else echo "has_py=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Ruff lint
+        if: steps.changed.outputs.has_py == 'true'
+        run: |
+          echo "${{ steps.changed.outputs.py_files }}" | xargs -r ruff check --output-format=github || true
+
+      - name: Security pattern scan
+        run: python3 .github/scripts/level_a_security.py
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.sha }}
+
+      - name: Post Level A result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const result = fs.readFileSync('/tmp/level_a_result.md', 'utf8');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: result
+              });
+            } catch (e) {
+              console.log('No Level A result file found');
+            }
+
+  level-b-gpt:
+    name: "Level B: GPT-5.4 Full-File Review"
+    runs-on: ubuntu-latest
+    outputs:
+      review_summary: ${{ steps.review.outputs.review_summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: GPT-5.4 full-file review
+        id: review
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 .github/scripts/level_b_review.py
+
+      - name: Post Level B result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const result = fs.readFileSync('/tmp/level_b_result.md', 'utf8');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: result
+              });
+            } catch (e) {
+              console.log('No Level B result file found');
+            }
+
+  level-e-grok:
+    name: "Level E: Grok 4.20 Full-File Review"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      review_summary: ${{ steps.review.outputs.review_summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Grok 4.20 full-file review
+        id: review
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 .github/scripts/level_e_review.py
+
+      - name: Post Level E result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const result = fs.readFileSync('/tmp/level_e_result.md', 'utf8');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: result
+              });
+            } catch (e) {
+              console.log('No Level E result file found');
+            }
+
+  consilium:
+    name: "Consilium: Multi-Model Verdict"
+    needs: [level-a-lint, level-b-gpt, level-e-grok]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      final_verdict: ${{ steps.vote.outputs.verdict }}
+      findings: ${{ steps.vote.outputs.findings }}
+      findings_count: ${{ steps.vote.outputs.findings_count }}
+    steps:
+      - name: Collect verdicts and vote
+        id: vote
+        uses: actions/github-script@v7
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        with:
+          script: |
+            const reviews = [];
+
+            // --- Level A (lint) --- from job result
+            const levelAResult = '${{ needs.level-a-lint.result }}';
+            reviews.push({
+              model: 'Level A (Ruff+Security)',
+              verdict: levelAResult === 'success' ? 'ACCEPT' : 'REJECT',
+              findings: levelAResult === 'success' ? [] : ['Lint or security pattern check failed']
+            });
+
+            // --- Level B (GPT-5.4) --- from structured JSON output
+            const levelBResult = '${{ needs.level-b-gpt.result }}';
+            const levelBRaw = `${{ needs.level-b-gpt.outputs.review_summary }}`;
+            let levelB = { model: 'Level B (GPT-5.4)', verdict: 'UNKNOWN', findings: [] };
+            if (levelBRaw) {
+              try {
+                const parsed = JSON.parse(levelBRaw);
+                levelB.verdict = parsed.verdict || 'UNKNOWN';
+                levelB.findings = parsed.findings || [];
+              } catch (e) {
+                console.log('Failed to parse Level B output:', e.message);
+              }
+            }
+            if (levelB.verdict === 'UNKNOWN' && levelBResult === 'failure') {
+              levelB.verdict = 'REJECT';
+              levelB.findings = ['Job failed (API error or REJECT)'];
+            }
+            reviews.push(levelB);
+
+            // --- Level E (Grok 4.20) --- from structured JSON output, advisory
+            const levelERaw = `${{ needs.level-e-grok.outputs.review_summary }}`;
+            let levelE = { model: 'Level E (Grok 4.20)', verdict: 'UNKNOWN', findings: [] };
+            if (levelERaw) {
+              try {
+                const parsed = JSON.parse(levelERaw);
+                levelE.verdict = parsed.verdict || 'UNKNOWN';
+                levelE.findings = parsed.findings || [];
+              } catch (e) {
+                console.log('Failed to parse Level E output:', e.message);
+              }
+            }
+            reviews.push(levelE);
+
+            // --- GitHub Apps --- adaptive polling (15s intervals, 3min max)
+            const KNOWN_BOTS = [
+              'gemini-code-assist[bot]',
+              'copilot-pull-request-reviewer[bot]',
+              'github-copilot[bot]'
+            ];
+            const EXPECTED_APP_COUNT = 2;
+            const MAX_WAIT_MS = 420000;  // 7 minutes — completeness over speed
+            const POLL_INTERVAL_MS = 15000;
+            const NOTIFY_INTERVAL_MS = 180000;  // Telegram progress every 3 min
+            const SEVERITY_KEYWORDS = ['critical', 'must fix', 'blocking', 'vulnerability', 'high severity'];
+            const NEGATION_PHRASES = [
+              'no critical', 'no major', 'no blocking', 'no vulnerability',
+              'not critical', 'not blocking', 'no issues', 'no bugs',
+              'no security issues', 'no security concerns', 'no significant',
+              'no severe', 'no problems', 'looks good', 'lgtm', 'approve',
+              'well-structured', 'clean', 'no high severity',
+            ];
+            function hasSeverityIssue(text) {
+              const lower = text.toLowerCase();
+              if (NEGATION_PHRASES.some(neg => lower.includes(neg))) return false;
+              return SEVERITY_KEYWORDS.some(kw => lower.includes(kw));
+            }
+
+            const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+            const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
+            const REPO = process.env.GITHUB_REPOSITORY;
+            const PR_NUM = context.issue.number;
+
+            async function tgNotify(msg) {
+              if (!TG_TOKEN || !TG_CHAT) return;
+              try {
+                await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ chat_id: TG_CHAT, text: msg }),
+                });
+              } catch (e) { /* non-blocking */ }
+            }
+
+            const startTime = Date.now();
+            let appReviews = [];
+            let lastNotifyMs = 0;
+
+            console.log('Polling for GitHub App reviews (max 7 min, 15s intervals)...');
+            while (Date.now() - startTime < MAX_WAIT_MS) {
+              const { data: allPrReviews } = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+              });
+
+              appReviews = allPrReviews.filter(r =>
+                KNOWN_BOTS.includes(r.user.login) ||
+                (r.user.type === 'Bot' && !r.user.login.includes('github-actions'))
+              );
+
+              if (appReviews.length >= EXPECTED_APP_COUNT) {
+                console.log(`Both GitHub Apps responded after ${Math.round((Date.now() - startTime) / 1000)}s`);
+                break;
+              }
+
+              // Telegram progress every 3 minutes
+              const elapsed = Date.now() - startTime;
+              if (elapsed - lastNotifyMs >= NOTIFY_INTERVAL_MS) {
+                lastNotifyMs = elapsed;
+                const mins = Math.round(elapsed / 60000);
+                await tgNotify(`\u23f3 Consilium waiting... ${appReviews.length}/${EXPECTED_APP_COUNT} GitHub Apps, ${mins}m elapsed — ${REPO} #${PR_NUM}`);
+              }
+
+              await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+            }
+
+            const waitSeconds = Math.round((Date.now() - startTime) / 1000);
+            console.log(`GitHub Apps polling done: ${appReviews.length}/${EXPECTED_APP_COUNT} in ${waitSeconds}s`);
+
+            // Parse GitHub App review states (latest per bot)
+            const latestByBot = new Map();
+            for (const review of appReviews) {
+              const login = review.user.login;
+              const existing = latestByBot.get(login);
+              if (!existing || new Date(review.submitted_at) > new Date(existing.submitted_at)) {
+                latestByBot.set(login, review);
+              }
+            }
+
+            for (const [login, review] of latestByBot) {
+              let displayName = login.replace('[bot]', '');
+              if (displayName.includes('gemini')) displayName = 'Gemini Code Assist';
+              if (displayName.includes('copilot')) displayName = 'Copilot PR Reviewer';
+
+              let verdict = 'UNKNOWN';
+              let findings = [];
+
+              if (review.state === 'APPROVED') {
+                verdict = 'ACCEPT';
+              } else if (review.state === 'CHANGES_REQUESTED') {
+                verdict = 'REJECT';
+                findings = [`Changes requested by ${displayName}`];
+              } else if (review.state === 'COMMENTED') {
+                // COMMENTED state: bots that want REJECT use CHANGES_REQUESTED.
+                // COMMENTED = informational. Use negation-aware keyword check.
+                const body = review.body || '';
+                if (hasSeverityIssue(body)) {
+                  verdict = 'ACCEPT_WITH_FIXES';
+                  findings = [`Severity keywords in ${displayName} review: ${body.substring(0, 200)}`];
+                } else if (body.trim()) {
+                  verdict = 'ACCEPT';
+                  findings = [];
+                } else {
+                  verdict = 'ACCEPT';
+                }
+              }
+
+              reviews.push({ model: displayName, verdict, findings });
+            }
+
+            // UNKNOWN entries for apps that did not respond
+            const respondedLogins = [...latestByBot.keys()].map(l => l.toLowerCase());
+            if (!respondedLogins.some(l => l.includes('gemini'))) {
+              reviews.push({ model: 'Gemini Code Assist', verdict: 'UNKNOWN', findings: [] });
+            }
+            if (!respondedLogins.some(l => l.includes('copilot'))) {
+              reviews.push({ model: 'Copilot PR Reviewer', verdict: 'UNKNOWN', findings: [] });
+            }
+
+            // --- Adaptive quorum vote ---
+            const validReviews = reviews.filter(r => r.verdict !== 'UNKNOWN');
+            const total = validReviews.length;
+            const majority = Math.ceil(total / 2);
+
+            const rejectCount = validReviews.filter(r => r.verdict === 'REJECT').length;
+            const acceptCount = validReviews.filter(r => r.verdict === 'ACCEPT').length;
+            const awfCount = validReviews.filter(r => r.verdict === 'ACCEPT_WITH_FIXES').length;
+
+            let finalVerdict = 'MIXED';
+            if (total === 0) {
+              finalVerdict = 'UNKNOWN';
+            } else if (rejectCount >= majority) {
+              finalVerdict = 'REJECT';
+            } else if (acceptCount >= majority) {
+              finalVerdict = 'ACCEPT';
+            } else if (awfCount >= majority || (awfCount + acceptCount >= majority)) {
+              finalVerdict = 'ACCEPT_WITH_FIXES';
+            }
+
+            const allFindings = reviews.flatMap(r =>
+              (r.findings || []).map(f => `[${r.model}] ${f}`)
+            );
+
+            // --- Build consilium comment ---
+            const emoji = {
+              'ACCEPT': '\u2705', 'ACCEPT_WITH_FIXES': '\u26a0\ufe0f',
+              'REJECT': '\u274c', 'MIXED': '\ud83d\udd36', 'UNKNOWN': '\u2753'
+            };
+
+            let body = `## \ud83c\udfdb\ufe0f Consilium Verdict: **${finalVerdict}** (${total}/${reviews.length} responded)\n\n`;
+            body += `| Reviewer | Verdict | Findings |\n|----------|---------|----------|\n`;
+            for (const r of reviews) {
+              const fc = (r.findings || []).length;
+              const icon = emoji[r.verdict] || '\u2753';
+              body += `| ${r.model} | ${icon} ${r.verdict} | ${fc > 0 ? fc + ' issue(s)' : 'Clean'} |\n`;
+            }
+
+            if (allFindings.length > 0) {
+              body += `\n### Findings\n`;
+              for (const f of allFindings.slice(0, 20)) {
+                body += `- ${f}\n`;
+              }
+            }
+
+            body += `\n---\n_Consilium: adaptive quorum ${majority}/${total} required. `;
+            body += `${reviews.length - total} reviewer(s) did not respond. `;
+            body += `GitHub Apps: waited ${waitSeconds}s, ${latestByBot.size}/${EXPECTED_APP_COUNT} responded._`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body,
+            });
+
+            core.setOutput('verdict', finalVerdict);
+            // Sanitize findings: strip backticks and newlines that break template literals
+            const sanitized = allFindings.map(f => f.replace(/`/g, "'").replace(/\n/g, ' ').substring(0, 200));
+            core.setOutput('findings', JSON.stringify(sanitized));
+            core.setOutput('findings_count', String(allFindings.length));
+
+      - name: Send Telegram notification
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          VERDICT="${{ steps.vote.outputs.verdict }}"
+          COUNT="${{ steps.vote.outputs.findings_count }}"
+          REPO="${{ github.repository }}"
+          PR="#${{ github.event.pull_request.number }}"
+          TITLE="${{ github.event.pull_request.title }}"
+          MSG=$(cat <<MSGEOF
+          Consilium: ${VERDICT} — ${REPO} ${PR}
+          ${TITLE}
+          MSGEOF
+          )
+          if [ "$COUNT" != "0" ] && [ -n "$COUNT" ]; then MSG="${MSG} (${COUNT} findings)"; fi
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}" > /dev/null 2>&1 || true
+
+  create-issues:
+    name: "Create Issue for Findings"
+    needs: [consilium]
+    if: needs.consilium.outputs.final_verdict == 'REJECT' || needs.consilium.outputs.final_verdict == 'ACCEPT_WITH_FIXES'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let findings = [];
+            try {
+              findings = JSON.parse(`${{ needs.consilium.outputs.findings }}`);
+            } catch (e) {
+              findings = ['(could not parse findings)'];
+            }
+
+            if (findings.length === 0) return;
+
+            const verdict = '${{ needs.consilium.outputs.final_verdict }}';
+            const prUrl = context.payload.pull_request.html_url;
+            const prNumber = context.issue.number;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Consilium ${verdict}: ${findings.length} finding(s) from PR #${prNumber}`,
+              body: `## Findings from PR #${prNumber}\n\n` +
+                    findings.map(f => `- ${f}`).join('\n') +
+                    `\n\n**PR:** ${prUrl}\n**Verdict:** ${verdict}\n\n_Auto-created by consilium_`,
+              labels: ['ai-review', 'auto-created'],
+            });
+
+      - name: Ask Copilot to fix (REJECT only)
+        if: needs.consilium.outputs.final_verdict == 'REJECT'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '@copilot The consilium REJECTED this PR. Please review and fix the findings listed above.',
+            });
+
+  auto-merge:
+    name: "Auto-Merge"
+    needs: [consilium]
+    if: needs.consilium.outputs.final_verdict == 'ACCEPT' || needs.consilium.outputs.final_verdict == 'ACCEPT_WITH_FIXES'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Merge PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch
