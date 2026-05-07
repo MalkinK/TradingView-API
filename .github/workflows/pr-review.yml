@@ -170,6 +170,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          LEVEL_B_RAW: ${{ needs.level-b-gpt.outputs.review_summary }}
+          LEVEL_E_RAW: ${{ needs.level-e-grok.outputs.review_summary }}
         with:
           script: |
             const reviews = [];
@@ -183,8 +185,11 @@ jobs:
             });
 
             // --- Level B (GPT-5.4) --- from structured JSON output
+            // env-var indirection: GitHub Actions does NOT substitute env values
+            // into the JS source at workflow-parse time. Backticks / ${...} in
+            // the upstream review summary cannot break the script body.
             const levelBResult = '${{ needs.level-b-gpt.result }}';
-            const levelBRaw = `${{ needs.level-b-gpt.outputs.review_summary }}`;
+            const levelBRaw = process.env.LEVEL_B_RAW || '';
             let levelB = { model: 'Level B (GPT-5.4)', verdict: 'UNKNOWN', findings: [] };
             if (levelBRaw) {
               try {
@@ -202,7 +207,8 @@ jobs:
             reviews.push(levelB);
 
             // --- Level E (Grok 4.20) --- from structured JSON output, advisory
-            const levelERaw = `${{ needs.level-e-grok.outputs.review_summary }}`;
+            // Same env-var indirection rationale as Level B above.
+            const levelERaw = process.env.LEVEL_E_RAW || '';
             let levelE = { model: 'Level E (Grok 4.20)', verdict: 'UNKNOWN', findings: [] };
             if (levelERaw) {
               try {
