@@ -14,6 +14,7 @@ Created: 2026-04-11
 
 import json
 import os
+import socket
 import sys
 import time
 import urllib.parse
@@ -174,6 +175,16 @@ def send_telegram(message: str) -> bool:
         return False
 
     try:
+        # Prefix message with machine label so Spark vs WRX80 senders are
+        # distinguishable in the shared Telegram channel.
+        _hn = socket.gethostname().lower()
+        if "spark" in _hn:
+            _label = "Spark"
+        elif "wrx" in _hn or "workstation" in _hn:
+            _label = "WRX80"
+        else:
+            _label = _hn[:12] or "unknown"
+        message = f"[{_label}] {message}"
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         data = urllib.parse.urlencode({
             "chat_id": chat_id,
