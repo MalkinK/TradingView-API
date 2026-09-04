@@ -1,2 +1,5 @@
 .env
 node_modules/
+# house sweep 2026-09-04 (FBL-C): not source — kept out of history
+__pycache__/
+*.pyc

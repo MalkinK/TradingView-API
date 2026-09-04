@@ -34,7 +34,7 @@ STALE_THRESHOLD_HOURS = 2.5
 # Simplified: weekdays are always "market hours" for alerting purposes.
 # Weekend = Saturday all day + Sunday before 17:00 CT (UTC-6 winter / UTC-5 summer)
 
-# Path to ibkr_stack env_loader for credential access
+# Path to ibkr env_loader for credential access
 IBKR_SCRIPTS_DIR = os.path.join(os.path.expanduser("~"), "ibkr", "scripts")
 
 
@@ -155,7 +155,7 @@ def mark_alert_sent() -> None:
 
 def send_telegram(message: str) -> bool:
     """Send Telegram alert using encrypted env credentials."""
-    # Try loading credentials via ibkr_stack env_loader
+    # Try loading credentials via ibkr env_loader
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
 
